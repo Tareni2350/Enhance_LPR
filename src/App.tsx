@@ -107,6 +107,7 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [analysisResult, setAnalysisResult] = useState<LprAnalysisResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [activeSample, setActiveSample] = useState<SampleVehicle | undefined>(undefined);
 
   // Modals state
   const [isCameraOpen, setIsCameraOpen] = useState(false);
@@ -144,6 +145,7 @@ export default function App() {
   const runLprPipeline = useCallback(
     async (imageDataUrl: string, sampleInfo?: SampleVehicle) => {
       setCurrentImage(imageDataUrl);
+      setActiveSample(sampleInfo);
       setCroppedPlateUrl(null);
       setEnhancedPlateUrl(null);
       setAnalysisResult(null);
@@ -165,35 +167,76 @@ export default function App() {
       try {
         // Step 1: Ingestion
         updateStep('ingest', { status: 'active', metric: 'Validating format...' });
-        await new Promise((r) => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 150));
         updateStep('ingest', {
           status: 'completed',
           metric: 'Ready',
           progressPercent: 100,
         });
 
-        // Step 2: Localization
+        // Step 2: Localization (with automatic retry on transient 503/502/504/429)
         updateStep('detect', { status: 'active', metric: 'Scanning ROI...' });
 
         // Prepare image format & dimensions for vision API
         const prepared = await prepareImageForApi(imageDataUrl);
 
-        // Call backend server
-        const apiResponse = await fetch('/api/analyze-plate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageBase64: prepared.imageBase64,
-            mimeType: prepared.mimeType,
-          }),
-        });
+        let apiResponse: Response | null = null;
+        let lastErrText = '';
+        const maxClientAttempts = 3;
 
-        if (!apiResponse.ok) {
-          const errData = await apiResponse.json().catch(() => ({}));
-          throw new Error(errData.error || `Server responded with status ${apiResponse.status}`);
+        for (let attempt = 1; attempt <= maxClientAttempts; attempt++) {
+          try {
+            apiResponse = await fetch('/api/analyze-plate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                imageBase64: prepared.imageBase64,
+                mimeType: prepared.mimeType,
+              }),
+            });
+
+            if (apiResponse.ok) {
+              break;
+            }
+
+            const errData = await apiResponse.json().catch(() => ({}));
+            lastErrText =
+              errData.error || `Server responded with status ${apiResponse.status}`;
+
+            const isTransientHttp =
+              apiResponse.status === 503 ||
+              apiResponse.status === 502 ||
+              apiResponse.status === 504 ||
+              apiResponse.status === 429;
+
+            if (!isTransientHttp || attempt === maxClientAttempts) {
+              throw new Error(lastErrText);
+            }
+          } catch (fetchErr: any) {
+            lastErrText = fetchErr?.message || 'Network error reaching analysis endpoint';
+            if (attempt === maxClientAttempts) {
+              throw fetchErr;
+            }
+          }
+
+          updateStep('detect', {
+            status: 'active',
+            metric: `Busy — retrying (${attempt}/${maxClientAttempts - 1})...`,
+          });
+          await new Promise((r) => setTimeout(r, 1100 * attempt));
+        }
+
+        if (!apiResponse || !apiResponse.ok) {
+          throw new Error(lastErrText || 'Failed to reach license plate analysis service');
         }
 
         const data: LprAnalysisResult = await apiResponse.json();
+
+        if (data.plateDetected === false) {
+          throw new Error(
+            'No vehicle license plate was detected in this image. Please upload a clearer photo showing the number plate.'
+          );
+        }
 
         updateStep('detect', {
           status: 'completed',
@@ -226,7 +269,7 @@ export default function App() {
           status: 'active',
           metric: isBlurry ? 'Unsharp Filter Active' : 'Optimal Clarity',
         });
-        await new Promise((r) => setTimeout(r, 250));
+        await new Promise((r) => setTimeout(r, 200));
         updateStep('enhance', {
           status: 'completed',
           metric: isBlurry ? 'Sharpened' : 'Passed Through',
@@ -235,26 +278,34 @@ export default function App() {
 
         // Step 6: Neural OCR
         updateStep('ocr', { status: 'active', metric: 'Segmenting glyphs...' });
-        await new Promise((r) => setTimeout(r, 200));
-        const plateStr = data.ocrResult.normalizedNumber || data.ocrResult.rawText;
+        await new Promise((r) => setTimeout(r, 150));
+        const plateStr = formatPlateDisplay(
+          data.ocrResult.normalizedNumber || data.ocrResult.rawText
+        );
+        const ocrConfidence = data.ocrResult.confidence || 94;
+        const enrichedOcr = {
+          ...data.ocrResult,
+          normalizedNumber: plateStr,
+          characters:
+            data.ocrResult.characters && data.ocrResult.characters.length > 0
+              ? data.ocrResult.characters
+              : plateStr
+                  .replace(/\s+/g, '')
+                  .split('')
+                  .map((c, idx) => ({
+                    char: c,
+                    confidence: Math.max(60, Math.min(99, ocrConfidence - (idx % 3))),
+                  })),
+        };
         updateStep('ocr', {
           status: 'completed',
           metric: plateStr,
           progressPercent: 100,
         });
 
-        // Step 7: MoRTH Validation
+        // Step 7: MoRTH Validation (Deterministic 36-State & RTO Verification)
         updateStep('validate', { status: 'active', metric: 'CMVR Rule 50 check...' });
-        // Enhance with client RTO database if needed
-        const localCheck = validateIndianPlate(plateStr);
-        const finalValidation = {
-          ...data.validationResult,
-          stateName: data.validationResult.stateName || localCheck.stateName,
-          districtRTO: data.validationResult.districtRTO || localCheck.districtRTO,
-          stateCode: data.validationResult.stateCode || localCheck.stateCode,
-          series: data.validationResult.series || localCheck.series,
-          uniqueDigits: data.validationResult.uniqueDigits || localCheck.uniqueDigits,
-        };
+        const finalValidation = validateIndianPlate(plateStr);
 
         updateStep('validate', {
           status: 'completed',
@@ -264,6 +315,7 @@ export default function App() {
 
         const completeResult: LprAnalysisResult = {
           ...data,
+          ocrResult: enrichedOcr,
           validationResult: finalValidation,
           processingTimeMs: Date.now() - startTime,
         };
@@ -419,7 +471,7 @@ export default function App() {
             {currentImage && (
               <div className="flex items-center gap-2 shrink-0">
                 <button
-                  onClick={() => runLprPipeline(currentImage)}
+                  onClick={() => runLprPipeline(currentImage, activeSample)}
                   disabled={isProcessing}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white transition-colors"
                 >

@@ -233,7 +233,7 @@ export async function prepareImageForApi(
   const img = await loadImage(imageSource);
   const origW = img.naturalWidth || img.width || 800;
   const origH = img.naturalHeight || img.height || 500;
-  const maxDim = 1280;
+  const maxDim = 1024;
 
   const needsResize = origW > maxDim || origH > maxDim;
   const isSvg =
@@ -246,7 +246,7 @@ export async function prepareImageForApi(
       detectedMime === 'image/png' ||
       detectedMime === 'image/webp');
 
-  const isTooLargePayload = imageSource.length > 1_800_000;
+  const isTooLargePayload = imageSource.length > 900_000;
 
   if (!isSvg && !needsResize && !isTooLargePayload && isSupportedDirect) {
     return { imageBase64: imageSource, mimeType: detectedMime };
@@ -273,7 +273,7 @@ export async function prepareImageForApi(
   ctx.drawImage(img, 0, 0, targetW, targetH);
 
   const outputMime = isSvg ? 'image/png' : 'image/jpeg';
-  const exported = canvas.toDataURL(outputMime, 0.88);
+  const exported = canvas.toDataURL(outputMime, 0.85);
   return { imageBase64: exported, mimeType: outputMime };
 }
 
