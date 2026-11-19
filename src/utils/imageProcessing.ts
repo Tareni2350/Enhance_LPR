@@ -246,7 +246,9 @@ export async function prepareImageForApi(
       detectedMime === 'image/png' ||
       detectedMime === 'image/webp');
 
-  if (!isSvg && !needsResize && isSupportedDirect) {
+  const isTooLargePayload = imageSource.length > 1_800_000;
+
+  if (!isSvg && !needsResize && !isTooLargePayload && isSupportedDirect) {
     return { imageBase64: imageSource, mimeType: detectedMime };
   }
 
@@ -271,7 +273,7 @@ export async function prepareImageForApi(
   ctx.drawImage(img, 0, 0, targetW, targetH);
 
   const outputMime = isSvg ? 'image/png' : 'image/jpeg';
-  const exported = canvas.toDataURL(outputMime, 0.9);
+  const exported = canvas.toDataURL(outputMime, 0.88);
   return { imageBase64: exported, mimeType: outputMime };
 }
 
