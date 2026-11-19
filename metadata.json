@@ -1,0 +1,6 @@
+{
+  "name": "EnhanceLPR - AI-Powered License Plate Recognition",
+  "description": "Advanced AI pipeline for vehicle license plate detection, blur quality assessment, clarity enhancement, neural OCR, and Indian CMVR/MoRTH registration plate validation.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
